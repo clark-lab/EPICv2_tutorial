@@ -1,0 +1,776 @@
+---
+title: "EPICv2 Workflow: From .idats to DMRs  
+- Using DMRcate to identify Differentially Methylated Regions from EPICv2 data"
+author: "Braydon Meyer (b.meyer@garvan.org.au), Ruth Pidsley (r.pidsley@garvan.org.au) & Tim Peters (t.peters@garvan.org.au)"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    theme: hpstr
+    number_sections: true
+    toc: yes
+    toc_flaot:
+      collapsed: true
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 2400px !important;
+  margin: auto;
+}
+</style>
+
+# - Introduction
+
+A link to the RMarkdown script can be found here: https://github.com/clark-lab/EPICv2_tutorial/blob/main/EPICv2_Tutorial_Final.Rmd
+
+In this tutorial we will demonstrate an easy and reproducible workflow for methylation data from the Illumina EPICv2 array, using the updated version of DMRcate to discover Differentially Methylated Regions (DMRs). This version allows for precise control over the probes to be included in analyses based on user preference, including removing, merging, or selecting duplicated probes and rescuing cross-hybridising probes, as explored in our recent paper on the new EPICv2 array (<https://doi.org/10.1186/s12864-024-10027-5>). This tutorial will take raw .idat files as input, apply our recommended quality control measures and finish by identifying DMRs. The steps include:
+
+-   Setting up the R environment and necessary packages\
+-   Downloading publicly available data from GEO for use in this tutorial\
+-   Reading in of raw .idat files and normalisation using the SeSAMe package\
+-   Filtering for poor performing or flagged probes and samples through new DMRcate functions that use our enhanced version of the EPICv2 manifest\
+-   Plots to survey the data at a high level: Determine variance, distribution of data, and sample mix-ups according to control SNPs\
+-   Using DMRcate to discover and visualise differentially methylated regions
+
+# - Install and load packages
+
+Major package citations (Please cite these packages if you use any of this tutorial in your work):
+
+EPICv2 Paper and Manifest: Peters T.J., Meyer B, Ryan L, Achinger-Kawecka J, Song J, Campbell EM, Qu W, Nair S, Loi-Luu P, Stricker P, Lim E, Stirzaker C, Clark SJ, Pidsley R. Characterisation and reproducibility of the HumanMethylationEPIC v2.0 BeadChip for DNA methylation profiling. BMC Genomics. 2024 Mar 6;25(1):251. doi: <https://doi.org/10.1186/s12864-024-10027-5>. PMID: 38448820; PMCID: PMC10916044.
+
+DMRcate: Peters, T.J., Buckley, M.J., Statham, A.L., Pidsley, R., Samaras, K., Lord, R.V., Clark, S.J., Molloy, P.L. De novo identification of differentially methylated regions in the human genome. Epigenetics & Chromatin 8, 6 (2015). <https://doi.org/10.1186/1756-8935-8-6>
+
+SeSAMe: Wanding Zhou, Timothy J Triche, Peter W Laird, Hui Shen, SeSAMe: reducing artifactual detection of DNA methylation by Infinium BeadChips in genomic deletions, Nucleic Acids Research, Volume 46, Issue 20, 16 November 2018, Page e123, <https://doi.org/10.1093/nar/gky691>
+
+```{r setup, warning=F, message=FALSE}
+## Install Bioconductor if you do not already have it
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+## Install required packages for this tutorial
+BiocManager::install(
+  c(
+    "pacman",
+    "DMRcate",
+    "ggplot2",
+    "GEOquery",
+    "sesame",
+    "patchwork",
+    "ggthemes",
+    "limma",
+    "plyr",
+    "data.table",
+    "tidyverse",
+    "ggrepel",
+    "GenomicRanges",
+    "Gviz",
+    "RColorBrewer"
+  )
+)
+
+## Load packages
+pacman::p_load(
+  GenomicRanges,
+  sesame,
+  tidyverse,
+  limma,
+  ggplot2,
+  GEOquery,
+  ggthemes,
+  DMRcate,
+  plyr,
+  data.table,
+  ggrepel,
+  patchwork,
+  Gviz,
+  RColorBrewer
+)
+
+## Initialise sesame - Only needs to be done once
+sesameDataCache()
+```
+
+# - Download data
+
+For this tutorial we are using the publicly available LNCaP and PREC cell lines (500ng concentration) from Peters *et al.* (2024) from GEO (<https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE240469>). We will download this data in the chunk below, so you don't have to manually get it from the above link.
+
+If you would like to use your own data, please create sample table and variables of interest in the same format, with your own .idats, samples and variables.
+
+```{r, message=FALSE, warning=FALSE}
+## Create data table for idat sample download - You can have your own sample_table here instead.
+sample_table <- data.frame(
+  Accession = c(
+    "GSM7698438",
+    "GSM7698446",
+    "GSM7698462",
+    "GSM7698435",
+    "GSM7698443",
+    "GSM7698459"
+  ),
+  Name = c(
+    "LNCAP_500_1",
+    "LNCAP_500_2",
+    "LNCAP_500_3",
+    "PREC_500_1",
+    "PREC_500_2",
+    "PREC_500_3"
+  ),
+  Type = c("LNCaP", "LNCaP", "LNCaP", "PREC", "PREC", "PREC")
+)
+
+sample_table$Name2 <- paste(sample_table$Accession, sample_table$Name, sep =
+                              "_")
+
+## Define your variable of interest and convert to a factor
+variable.of.choice <- as.factor(sample_table$Type)
+
+## Create standard colour pallet first
+myColors <- gdocs_pal()(length(unique(variable.of.choice)))
+
+names(myColors) <- levels(factor(levels = unique(variable.of.choice)))
+colScale <- scale_colour_manual(
+  name = "Cell Line",
+  values = myColors,
+  drop = T,
+  limits = force
+)
+
+## If you would like to view the new manifest, you can bring it into your environment through annotation hub
+ah <- AnnotationHub()
+EPICv2manifest <- ah[["AH116484"]]
+```
+
+```{r, eval=F}
+## Download specific idats for this tutorial
+gsmlist <- sapply(
+  sample_table$Accession,
+  getGEOSuppFiles,
+  makeDirectory = T,
+  baseDir = getwd()
+)
+```
+
+# - Read in EPICv2 .idats and generate beta value table
+
+The SeSAMe package has some wonderful functions that make it easy to find your raw .idat files and a single-line code for quality control, normalisation and beta value generation. At this point you can use SeSame functions to mask particular probes as defined by Zhou *et al* (2017). However, for this workflow we will apply our own quality control to retain some probes that would otherwise be masked, for use or removal through user options with the DMRcate functions.
+
+```{r, }
+## Find downloaded .idat files
+idats <- searchIDATprefixes(getwd())
+
+## Use sesame to prepare idats and extract beta values
+## The prep = "CDPB" function will allow for technical corrections to be made.
+## Specifically, C = Infer infinium I channel, D = dyeBiasNL, B = Noob Normalisation
+beta_v2 <- openSesame(idats, prep = "CDB", func = getBetas)
+
+## Reorder beta table to be same order as sample_table
+beta_v2 <- beta_v2[, match(sample_table$Name2, colnames(beta_v2))]
+```
+
+# - Quality control
+
+In this section, we will determine if we have sample mix-ups through the use of SNP control probes on the array. We will also determine which probes have a poor signal based on the detection p-value of probes. Users can apply their own discretion as to how stringent they want this QC step to be by altering the threshold for the percentage of failed samples tolerated per probe. Finally, we use the detection p-value to assess the overall quality of each individual sample, setting the threshold for removal of a sample as detection p-value \> 0.05 in \> 10% of probes.
+
+## - Identifying sample mix-ups with SNP control probes
+
+There are 65 probes on this array designed to target SNPs for QC from which we can determine if sample mix-ups have occurred. Below we can see that PREC and LNCaP samples have very different SNP profiles, but are the same for samples of the same cell types. *Note: If all of your samples are genetically identical then this step is unnecessary and the code will also fail (unless filter.nonvariant is set to FALSE in sesameQC_plotHeatSNPs).*
+
+```{r, fig.height=8}
+sdfs <- openSesame(idats, prep = "", func = NULL)
+sesameQC_plotHeatSNPs(sdfs)
+```
+
+## - Using the detection p-value
+
+### - Extracting detection p-value and filtering probes
+
+This method compares the total DNA signal (Methylated + Unmethylated) for each position to the background signal level. The background is estimated using negative control positions, assuming a normal distribution. A p-value is calculated for each position for each sample to help determine which probes are of good quality. P-values \> 0.05 should typically not be trusted.
+
+```{r, }
+## Extract the detection p-values for each probe
+pvals <- openSesame(idats, func = pOOBAH, return.pval = TRUE)
+pvals[pvals > 0.05] <- NA
+
+## Reorder pvals table to be same order as sample_table
+pvals <- pvals[, match(sample_table$Name2, colnames(pvals))]
+
+## Use detection p-value to determine if any probes are performing poorly and should be removed. We used 20% in this case which allows for one sample failure per probe (normally we would use 10% as we would have larger data sets to be working with)
+row_Ps <- apply(pvals, 1, function(x) {
+  sum(is.na(x))
+})
+
+probes_to_remove20 <- which(row_Ps > ((ncol(pvals) / 100) * 20))   ## <- Change this '20' to whatever threshold you would prefer. We normally use a 10% threshold.
+print(
+  paste(
+    length(probes_to_remove20) ,
+    "Probes failed by each having a detection P value > 0.05 in more than 20% of samples",
+    sep = " "
+  )
+)
+
+## Now we can remove these probes from the beta table and the detection p-values
+beta_v2.detP <- beta_v2[-probes_to_remove20, ]
+pvals2 <- pvals[-probes_to_remove20, ]
+
+## Finally, we can set all failed probes that have not been removed to NA in the beta table
+beta_v2.detP[is.na(pvals2)] <- NA
+```
+
+### - Filtering of samples based on detection p-value
+
+```{r, }
+## Use detection p-values to determine if any samples are poor quality based on a 10% cut-off and therefore should be removed
+## It's important to note that we should ideally remove repeatedly poor performing probes first before removing samples, as we do not want to penalise and remove samples due to probe-specific technical problems.
+detec <- apply(pvals2, 2, function(x) {
+  sum(is.na(x))
+})
+
+keep_samples <- which(detec < nrow(pvals) / 100 * 10) ## All samples survive a 10% cut-off
+print(
+  paste(
+    length(keep_samples) ,
+    "samples passed QC by each having fewer than 10% of all probes fail detection P value (>0.05)",
+    sep = " "
+  )
+)
+
+## Remove any failed samples. In this example, all samples passed QC!
+beta_v2.detP2 <- beta_v2.detP[, keep_samples]
+```
+
+## - Removal and handling of SNP, cross-hybridising, control, and duplicated probes
+
+We can use DMRcate functions to remove other probes that overlap common SNPs, as well as the *rs* and *nv* associated probes. Within this function you also have the option to remove the *XY chromosome probes* and *cross-hybridising probes* too based on **in silico** analysis (Peters *et al.* 2024).
+
+We can also choose how to handle replicate probes, a new feature of the EPICv2 arrays. We have multiple options available to us, in that we can collapse replicate probe sets by taking the **mean**, or selecting one probe per replicate probe set depending on which is more **specific** or **sensitive**, or even selecting **randomly.** We use **mean** as a default option in this tutorial.
+
+```{r message=FALSE, warning=FALSE}
+## Using functions from DMRcate, we are able to remove SNP and CH associated probes from the beta table.
+beta_v2.clean <- rmSNPandCH(beta_v2.detP2)
+
+## Note: If you would like to keep all of the SNPs then you can set parameters in the above code as follows. rmSNPandCH(beta_v2.detP2, dist=0, mafcut = 1)
+
+## We can also remove the replicate probes and collapse them based off preference. Mean, sensitivity, specificity and random are available options. We will use mean in this scenario
+beta_v2.clean <- rmPosReps(beta_v2.clean, filter.strategy = "mean")
+```
+
+## - High level survey of the data
+
+A good first pass of the data will consider global trends. Generally, methylation data has a binomial distribution with the majority of probes being either fully methylated or unmethylated. The density plot below is used to illustrate this distribution and check for differences between samples or groups. We can also look at the variability of our data through MDS plots.
+
+### - Density plots
+
+```{r, fig.height=8, warning=F}
+x <- data.table::melt(beta_v2.clean)
+x$Variable <- variable.of.choice[match(x$Var2, sample_table$Name2)]
+
+p1 <- ggplot(x, aes(x = value, color = Variable)) +
+  geom_density() +
+  theme_minimal() +
+  ylab("Density") +
+  theme(legend.position = "bottom") +
+  colScale +
+  ggtitle("Density Plot by Group Average")
+
+p2 <- ggplot(x, aes(x = value, color = Var2)) +
+  geom_density() +
+  theme_minimal() +
+  ylab("Density") +
+  theme(legend.position = "bottom") +
+  ggtitle("Density Plot by Sample")
+
+p1 / p2
+```
+
+Here we find that all of our samples show the standard bi-modal distribution as expected. We also find that our PREC cells show an increased density of probes at the higher (right) levels of methylation compared to LNCaP cells, indicating global hypermethylation in the LNCaP line. Looking at samples individually shows that there is little variability between samples of the same cell type.
+
+### - Multi-dimensional scaling (MDS) plots
+
+```{r, fig.width=6, fig.height=5}
+## MDS Plot for Variation of data
+plot <- limma::plotMDS(
+  beta_v2,
+  top = nrow(beta_v2),
+  cex = 0.5,
+  main = "All Samples",
+  labels = colnames(beta_v2),
+  plot = F
+)
+
+toplot <- data.frame(
+  distance.matrix = plot$distance.matrix,
+  x = plot$x,
+  y = plot$y
+)
+
+ggplot(
+  toplot$distance.matrix,
+  aes(
+    x = toplot$x,
+    y = toplot$y,
+    colour = variable.of.choice,
+    label = sample_table$Name
+  )
+) +
+  ggtitle("MDS - All Probes") +
+  geom_point(size = 3, alpha = 0.8) +
+  theme_bw() +
+  ylab("Dim 2") + xlab("Dim 1") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position = "bottom") +
+  colScale +
+  geom_text_repel(min.segment.length = 0, box.padding = 1)
+```
+
+This MDS plot, using all probes on the array as input, shows that our samples cluster by cell type, as expected. There is one LNCaP sample that is clustering alone, so it's worth keeping a note of this sample if any downstream analyses return questionable results.
+
+# - Differentially methylated regions (DMRs) with DMRcate
+
+Peters *et al* (2015) created the DMRcate package for identification of regions of differential methylation. Regions are of particular interest compared to differences at individual CpG sites as multiple coordinated changes are more likely to be a true change and may have more functional relevance. Here we show some of the updated functions that DMRcate offers with EPICv2, including options for removing replicate probes and for remapping of probes that have a closer affinity to their off-target location as defined in our new paper (Peters *et al*, 2024)
+
+## - Basic usage with DMRcate plot
+
+Our first example shows the default options in DMRcate to derive DMRs with all replicate probes and off-target, cross-hybridising probes removed in QC.
+
+```{r, fig.height=6, fig.width=8, warning=FALSE}
+## Create M values for DMRcate analysis
+M <- BetaValueToMValue(beta_v2.clean)
+
+## Create design for your comparison.
+design <- model.matrix( ~ variable.of.choice)
+
+## Annotate probes with appropriate position and probe weights.
+## We have the potential here to remap v2 probes that bias towards off-target areas of the genome, however we removed these earlier so we will set this parameter to FALSE and proceed with the basic analysis.
+## If you have multiple variables in your model, remember that the 'coef' call in cpg.annotate will find DMRs based on the column number selected as found in your design variable.
+myannotation <- cpg.annotate(
+  datatype = "array",
+  object = M,
+  what = "M",
+  arraytype = "EPICv2",
+  epicv2Remap = F,
+  analysis.type = "differential",
+  design = design,
+  coef = 2
+)
+
+## We can alter how permissive we are with the statistical cut-off for individual CpGs here.
+## Considering our initial analysis returned >500,000 differential probes, we are choosing to focus our DMR approach to the most significant probes.
+myannotation <- changeFDR(myannotation, 1e-10)
+```
+
+```{r, fig.height=6, fig.width=8, warning=FALSE, message=FALSE}
+## Run DMR analysis
+dmrcoutput <- dmrcate(myannotation)
+
+results.ranges <- extractRanges(dmrcoutput = dmrcoutput, genome = "hg38")
+length(results.ranges)
+
+## Plot the top DMR
+cols <- myColors[as.character(variable.of.choice)]
+
+DMR.plot(
+  ranges = results.ranges,
+  dmr = 1,
+  CpGs = beta_v2.clean,
+  what = "Beta",
+  arraytype = "EPICv2",
+  genome = "hg38",
+  phen.col = cols
+)
+```
+
+## - Remapping cross-hybridising probes and improving DMR calling with DMRcate and epicv2Remap()
+
+Here we will show how DMRcate can remap particular cross-hybridising probes from the new manifest to their off-target location based on empirical evidence. Users may want to use this option to improve accuracy of their results.
+
+Here, we provide an example of how a remapped probe has led to the identification of a DMR that was not present in our initial DMRcate analysis. For this tutorial, we use a 30% beta value difference threshold and require minimum three probes to identify DMRs that did not exist under default conditions.
+
+This method can add data in support of already existing DMRs, or discover new DMRs through the insertion of a probe that was previously incorrectly mapped. The "min.cpgs" and "betacutoff" variables in the dmrcate() function calls can be set according to user preference.
+
+```{r, warning=FALSE, message=F}
+## Here, we need to alter the beta table to maintain the cross-hybridising probes in order for us to remap them appropriately in the cpg.annotate() step used later.
+beta_v2.clean2 <- rmSNPandCH(beta_v2.detP2, rmcrosshyb = F)
+beta_v2.clean2 <- rmPosReps(beta_v2.clean2, filter.strategy = "mean")
+```
+
+```{r, warning=FALSE, fig.height=6, fig.width=8}
+## Create M values for DMRcate analysis
+M <- BetaValueToMValue(beta_v2.clean2)
+
+## Create design for your comparison.
+design <- model.matrix( ~ variable.of.choice)
+
+## Annotate probes with appropriate position and probe weights.
+myannotation.remap <- cpg.annotate(
+  datatype = "array",
+  object = M,
+  what = "M",
+  arraytype = "EPICv2",
+  epicv2Remap = T,
+  ## This is the formative variable that changed!
+  analysis.type = "differential",
+  design = design,
+  coef = 2
+)
+
+myannotation.remap <- changeFDR(myannotation.remap, 1e-10)
+```
+
+```{r, warning=FALSE, fig.height=6, fig.width=8, message=F}
+## Run DMR analysis
+dmrcoutput.remap.nothreshold <- dmrcate(myannotation.remap)
+
+results.ranges.remap <- extractRanges(dmrcoutput = dmrcoutput.remap.nothreshold, genome = "hg38")
+```
+
+Here we find that by using the 'epicv2Remap = T' variable, we have increased the number of significant probes from 538,081 to 543,398. This does however come at a cost of increased multiple-testing burden, thus when thresholding by FDR, we find \~8,000 less significant probes in the remapped dataset. However, below we will demonstrate how the remapped data results in more DMRs by having probes being mapped to their intended genomic location.
+
+```{r, }
+print(
+  paste(
+    "There are",
+    length(results.ranges),
+    "DMRs initially found using the default settings, however, by including the remapped probes, despite having an increased multiple-testing burden, we find that there are",
+    length(results.ranges.remap),
+    "DMRs using this method."
+  )
+)
+```
+
+```{r, warning=FALSE, fig.height=6, fig.width=8, message=F}
+## For the sake of showing "new" DMRs, extract ONLY the DMRs with three probes. 
+## We also use a betacutoff of 0.3 to reduce the amount of DMRs we find for easier demonstration in this tutorial.
+dmrcoutput.remap <- dmrcate(myannotation.remap,
+                            min.cpgs = 3,
+                            betacutoff = .3)
+results.ranges.remap2 <- extractRanges(dmrcoutput = dmrcoutput.remap, genome = "hg38")
+results.ranges.remap3 <- results.ranges.remap2[results.ranges.remap2$no.cpgs == 3, ]
+```
+
+```{r, }
+## Lets find DMRs of 3 CpG length that are uniquely found in our remapped dataset
+outer <- subsetByOverlaps(results.ranges.remap3,
+                          results.ranges,
+                          invert = T,
+                          type = "any")
+
+## We can also define the new probes using the cpg.annotate() data
+## Let's get a list of probes in a genomic range that are different between our two analyses. This should exclusively be the probes that are cross hybridising.
+remap.gr <- myannotation.remap@ranges[setdiff(names(myannotation.remap@ranges),
+                                              names(myannotation@ranges)), ]
+
+## Finally, let's see if any of our unique DMRs are because of an insertion of a remapped probe
+new.dmrs <- subsetByOverlaps(outer, remap.gr)
+length(new.dmrs)
+```
+
+Here we find 7 DMRs that have been created through the remapping of probes to their correct locations. Let's take a closer look at the DMR near *LINC01666.* This was previously not considered a DMR because there were only two probes in this region, which were too far apart to be called by DMRcate. Now another probe has been remapped in between these two probes, we find a new DMR!
+
+```{r, warning=FALSE, message = F, fig.height=6, fig.width=14}
+## Extract the DMR in question from dmrcate output
+x <- new.dmrs[2]
+
+## Extract the probes in this DMR
+probes <- subsetByOverlaps(myannotation.remap@ranges, x)
+
+betas <- beta_v2.clean2[rownames(beta_v2.clean2) %in% names(probes), ]
+betas <- betas[order(match(rownames(betas), names(probes))), ]
+melt <- melt(betas)
+
+## Plot
+colnames(melt)[2] <- "Sample"
+
+p <- ggplot(melt, aes(
+  x = Var1,
+  y = value * 100,
+  group = Sample,
+  colour = Sample
+)) +
+  geom_point(
+    size = 3,
+    alpha = 0.8,
+    position = position_jitter(width = 0.1, seed = 123)
+  ) +
+  geom_line(position = position_jitter(width = 0.1, seed = 123)) +
+  theme_bw() +
+  ylab("Beta (%)") + xlab("CpG Site") +
+  theme(legend.position = "bottom") +
+  ggtitle(
+    paste(
+      "Line Plot by Sample - New DMR - ",
+      x$overlapping.genes,
+      " (",
+      start(x),
+      " - ",
+      end(x),
+      ")",
+      sep = ""
+    )
+  ) +
+  ylim(0, 100) +
+  annotate(
+    'rect',
+    xmin = 1.8,
+    xmax = 2.2,
+    ymin = 0,
+    ymax = 100,
+    alpha = .2,
+    fill = 'forestgreen'
+  )
+
+melt$Line <- sample_table$Type[match(melt$Sample, sample_table$Name2)]
+
+melt2 <- melt %>% dplyr::group_by(Line, Var1) %>% dplyr::summarise(mean = mean(value) *
+                                                                     100, sd = sd(value) * 100)
+
+p2 <- ggplot(melt2, aes(
+  x = Var1,
+  y = mean,
+  group = Line,
+  colour = Line
+)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = .1) +
+  theme_bw() +
+  ylab("Beta (%)") + xlab("CpG Site") +
+  theme(legend.position = "bottom") +
+  ggtitle(
+    paste(
+      "Line Plot by Cell Line - New DMR - ",
+      x$overlapping.genes,
+      " (",
+      start(x),
+      " - ",
+      end(x),
+      ")",
+      sep = ""
+    )
+  ) +
+  ylim(0, 100) + colScale +
+  annotate(
+    'rect',
+    xmin = 1.8,
+    xmax = 2.2,
+    ymin = 0,
+    ymax = 100,
+    alpha = .2,
+    fill = 'forestgreen'
+  )
+
+p + p2
+```
+
+Finally, let's have a look at this probe using the Gviz package, to show where it lies in a genomic context and compared to other probes surrounding it.
+
+```{r, fig.height=8, fig.width=8, warning=F, message=FALSE}
+## Create gviz tracks for chromosome on top and bar for length of area
+gtrack <- Gviz::GenomeAxisTrack()
+ideoTrack <- IdeogramTrack(genome = "hg38", chromosome = seqnames(x))
+
+## Create track to extract genes from UCSC
+refGenes <- UcscTrack(
+  genome = "hg38",
+  chromosome = seqnames(x),
+  track = "NCBI RefSeq",
+  start = start(x),
+  end = end(x),
+  trackType = "GeneRegionTrack",
+  rstarts = "exonStarts",
+  rends = "exonEnds",
+  gene = "name",
+  symbol = "name2",
+  transcript = "name",
+  strand = "strand",
+  fill = "#8282d2",
+  stacking = "squish",
+  name = "NCBI RefSeq",
+  showId = TRUE,
+  geneSymbol = TRUE
+)
+
+## Create granges object that extracts positional information of each CpG and beta values from samples
+granges <- GRanges(
+  seqnames = probes@seqnames,
+  ranges = probes@ranges,
+  data = round(betas * 100, 3)
+)
+
+## Create track for data visualisation
+dTrack <- DataTrack(
+  granges,
+  name = "Beta",
+  ylim = c(0, 100),
+  groups = variable.of.choice,
+  col = myColors,
+  type = c("a", "confint"),
+  aggregation = "mean",
+  legend = TRUE,
+  na.rm = T
+)
+
+## Create a heatmap for each DMR
+dTrack.heatmap <- DataTrack(
+  granges,
+  name = "Beta",
+  ylim = c(0, 100),
+  gradient = brewer.pal(5, "Reds"),
+  showSampleNames = TRUE,
+  cex.sampleNames = 0.4,
+  type = c("heatmap"),
+  na.rm = T
+)
+
+## Add a bar to distinguish where the DMR is
+DMRbar <- AnnotationTrack(
+  start = start(x),
+  end = end(x),
+  chromosome = seqnames(x),
+  genome = "hg38",
+  col = "forestgreen",
+  fill = "forestgreen",
+  name = "DMR"
+)
+
+## Add lines to distinguish where CpGs are
+CpGbar <- AnnotationTrack(
+  start = start(probes),
+  end = end(probes),
+  chromosome = seqnames(probes),
+  genome = "hg38",
+  col = "forestgreen",
+  fill = "forestgreen",
+  name = "CpGs"
+)
+
+## Plot everything
+plotTracks(
+  c(
+    ideoTrack,
+    gtrack,
+    CpGbar,
+    DMRbar,
+    refGenes,
+    dTrack.heatmap,
+    dTrack
+  ),
+  from = start(x) - 200,
+  to = end(x) + 200
+)
+```
+
+```{r, fig.height=8, fig.width=8, warning=F, message=FALSE}
+## Extract the DMR in question from dmrcate output with a wider window (+- 5000bp)
+x2 <- x
+start(x2) <- start(x2) - 5000
+end(x2) <- end(x2) + 5000
+
+probes <- subsetByOverlaps(myannotation.remap@ranges, x2)
+
+betas <- beta_v2.clean2[rownames(beta_v2.clean2) %in% names(probes), ]
+betas <- betas[order(match(rownames(betas), names(probes))), ]
+
+## Create gviz tracks for chromosome on top and bar for length of area
+gtrack <- Gviz::GenomeAxisTrack()
+ideoTrack <- IdeogramTrack(genome = "hg38", chromosome = seqnames(x2))
+
+## Create track to extract genes from UCSC
+refGenes <- UcscTrack(
+  genome = "hg38",
+  chromosome = seqnames(x2),
+  track = "NCBI RefSeq",
+  start = start(x2),
+  end = end(x2),
+  trackType = "GeneRegionTrack",
+  rstarts = "exonStarts",
+  rends = "exonEnds",
+  gene = "name",
+  symbol = "name2",
+  transcript = "name",
+  strand = "strand",
+  fill = "#8282d2",
+  stacking = "squish",
+  name = "NCBI RefSeq",
+  showId = TRUE,
+  geneSymbol = TRUE
+)
+
+## Create granges object that extracts positional information of each CpG and beta values from samples
+granges <- GRanges(
+  seqnames = probes@seqnames,
+  ranges = probes@ranges,
+  data = round(betas * 100, 3)
+)
+
+## Create track for data visualisation
+dTrack <- DataTrack(
+  granges,
+  name = "Beta",
+  ylim = c(0, 100),
+  groups = variable.of.choice,
+  col = myColors,
+  type = c("a", "confint"),
+  aggregation = "mean",
+  legend = TRUE,
+  na.rm = T
+)
+
+## Create a heatmap for each DMR
+dTrack.heatmap <- DataTrack(
+  granges,
+  name = "Beta",
+  ylim = c(0, 100),
+  gradient = brewer.pal(5, "Reds"),
+  showSampleNames = TRUE,
+  cex.sampleNames = 0.4,
+  type = c("heatmap"),
+  na.rm = T
+)
+
+## Add a bar to distinguish where the DMR is
+DMRbar <- AnnotationTrack(
+  start = start(x),
+  end = end(x),
+  chromosome = seqnames(x),
+  genome = "hg38",
+  col = "forestgreen",
+  fill = "forestgreen",
+  name = "DMR"
+)
+
+## Add lines to distinguish where CpGs are
+CpGbar <- AnnotationTrack(
+  start = start(probes),
+  end = end(probes),
+  chromosome = seqnames(probes),
+  genome = "hg38",
+  col = "forestgreen",
+  fill = "forestgreen",
+  name = "CpGs"
+)
+
+## Plot everything
+plotTracks(
+  c(
+    ideoTrack,
+    gtrack,
+    CpGbar,
+    DMRbar,
+    refGenes,
+    dTrack.heatmap,
+    dTrack
+  ),
+  from = start(x2) - 200,
+  to = end(x2) + 200
+)
+```
+
+We can see how this new DMR looks, and that it is right in the promoter region of the *LINC01666.*
+
+We hope you have found this tutorial helpful. If you have any questions on how to analyse EPICv2 data, or its compatibility with the new manifest and DMRcate package update, then do not hesitate to send us an email.
+
+# - Session info
+
+```{r, }
+sessionInfo()
+```
