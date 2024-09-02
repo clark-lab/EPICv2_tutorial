@@ -140,7 +140,7 @@ ah <- AnnotationHub()
 EPICv2manifest <- ah[["AH116484"]]
 ```
 
-```{r, eval=F}
+```{r}
 ## Download specific idats for this tutorial
 gsmlist <- sapply(
   sample_table$Accession,
@@ -242,16 +242,12 @@ beta_v2.detP2 <- beta_v2.detP[, keep_samples]
 
 We can use DMRcate functions to remove other probes that overlap common SNPs, as well as the *rs* and *nv* associated probes. Within this function you also have the option to remove the *XY chromosome probes* and *cross-hybridising probes* too based on **in silico** analysis (Peters *et al.* 2024).
 
-We can also choose how to handle replicate probes, a new feature of the EPICv2 arrays. We have multiple options available to us, in that we can collapse replicate probe sets by taking the **mean**, or selecting one probe per replicate probe set depending on which is more **specific** or **sensitive**, or even selecting **randomly.** We use **mean** as a default option in this tutorial.
-
 ```{r message=FALSE, warning=FALSE}
 ## Using functions from DMRcate, we are able to remove SNP and CH associated probes from the beta table.
 beta_v2.clean <- rmSNPandCH(beta_v2.detP2)
 
 ## Note: If you would like to keep all of the SNPs then you can set parameters in the above code as follows. rmSNPandCH(beta_v2.detP2, dist=0, mafcut = 1)
 
-## We can also remove the replicate probes and collapse them based off preference. Mean, sensitivity, specificity and random are available options. We will use mean in this scenario
-beta_v2.clean <- rmPosReps(beta_v2.clean, filter.strategy = "mean")
 ```
 
 ## - High level survey of the data
@@ -328,6 +324,10 @@ This MDS plot, using all probes on the array as input, shows that our samples cl
 
 Peters *et al* (2015) created the DMRcate package for identification of regions of differential methylation. Regions are of particular interest compared to differences at individual CpG sites as multiple coordinated changes are more likely to be a true change and may have more functional relevance. Here we show some of the updated functions that DMRcate offers with EPICv2, including options for removing replicate probes and for remapping of probes that have a closer affinity to their off-target location as defined in our new paper (Peters *et al*, 2024)
 
+# - Treatment of replicate probes
+
+Replicate probes are groups of probes that map to the same CpG site; a new feature of the EPICv2 arrays. Since DMRcate requires a 1-to-1 relationship between rows of methylation measurements and CpG loci, lest the kernel become biased towards sites with multiple mappings, we need to truncate our matrix to maintain this relationship. To this end, we have multiple options available provided by the 'epicv2Filter' argument 'cpg.annotate()', in that we can collapse replicate probe sets by taking the **mean**, or selecting one probe per replicate probe set depending on which is more **specific** or **sensitive**, or even selecting **randomly.** We use **mean** as a default option in this tutorial.
+
 ## - Basic usage with DMRcate plot
 
 Our first example shows the default options in DMRcate to derive DMRs with all replicate probes and off-target, cross-hybridising probes removed in QC.
@@ -339,13 +339,14 @@ M <- BetaValueToMValue(beta_v2.clean)
 ## Create design for your comparison.
 design <- model.matrix( ~ variable.of.choice)
 
-## Annotate probes with appropriate position and probe weights.
+## Annotate probes with appropriate position and probe weights, including collapsing replicate probes.
 ## We have the potential here to remap v2 probes that bias towards off-target areas of the genome, however we removed these earlier so we will set this parameter to FALSE and proceed with the basic analysis.
 ## If you have multiple variables in your model, remember that the 'coef' call in cpg.annotate will find DMRs based on the column number selected as found in your design variable.
 myannotation <- cpg.annotate(
   datatype = "array",
   object = M,
-  what = "M",
+  what = "M", 
+  epicv2Filter = "mean",
   arraytype = "EPICv2",
   epicv2Remap = F,
   analysis.type = "differential",
@@ -371,7 +372,7 @@ cols <- myColors[as.character(variable.of.choice)]
 DMR.plot(
   ranges = results.ranges,
   dmr = 1,
-  CpGs = beta_v2.clean,
+  CpGs = myannotation,
   what = "Beta",
   arraytype = "EPICv2",
   genome = "hg38",
@@ -390,7 +391,6 @@ This method can add data in support of already existing DMRs, or discover new DM
 ```{r, warning=FALSE, message=F}
 ## Here, we need to alter the beta table to maintain the cross-hybridising probes in order for us to remap them appropriately in the cpg.annotate() step used later.
 beta_v2.clean2 <- rmSNPandCH(beta_v2.detP2, rmcrosshyb = F)
-beta_v2.clean2 <- rmPosReps(beta_v2.clean2, filter.strategy = "mean")
 ```
 
 ```{r, warning=FALSE, fig.height=6, fig.width=8}
@@ -405,6 +405,7 @@ myannotation.remap <- cpg.annotate(
   datatype = "array",
   object = M,
   what = "M",
+  epicv2Filter = "mean",
   arraytype = "EPICv2",
   epicv2Remap = T,
   ## This is the formative variable that changed!
@@ -423,14 +424,14 @@ dmrcoutput.remap.nothreshold <- dmrcate(myannotation.remap)
 results.ranges.remap <- extractRanges(dmrcoutput = dmrcoutput.remap.nothreshold, genome = "hg38")
 ```
 
-Here we find that by using the 'epicv2Remap = T' variable, we have increased the number of significant probes from 538,081 to 543,398. This does however come at a cost of increased multiple-testing burden, thus when thresholding by FDR, we find \~8,000 less significant probes in the remapped dataset. However, below we will demonstrate how the remapped data results in more DMRs by having probes being mapped to their intended genomic location.
+Here we find that by using the 'epicv2Remap = T' variable, we have increased the number of significant probes from 527,574 to 532,978. This does however come at a cost of increased multiple-testing burden, thus when thresholding by FDR, we find \~9,000 fewer significant probes in the remapped dataset. However, below we will demonstrate how the remapped data results in more DMRs by having probes being mapped to their intended genomic location.
 
 ```{r, }
 print(
   paste(
     "There are",
     length(results.ranges),
-    "DMRs initially found using the default settings, however, by including the remapped probes, despite having an increased multiple-testing burden, we find that there are",
+    "DMRs initially found using the default settings, however, by including the remapped probes, we find that there are",
     length(results.ranges.remap),
     "DMRs using this method."
   )
@@ -464,17 +465,16 @@ new.dmrs <- subsetByOverlaps(outer, remap.gr)
 length(new.dmrs)
 ```
 
-Here we find 7 DMRs that have been created through the remapping of probes to their correct locations. Let's take a closer look at the DMR near *LINC01666.* This was previously not considered a DMR because there were only two probes in this region, which were too far apart to be called by DMRcate. Now another probe has been remapped in between these two probes, we find a new DMR!
+Here we find 5 DMRs that have been created through the remapping of probes to their correct locations. Let's take a closer look at the DMR on chromosome 19. This was previously not considered a DMR because there was only one probe in this region. Now another 2 probes have been remapped nearby, we find a new DMR!
 
 ```{r, warning=FALSE, message = F, fig.height=6, fig.width=14}
 ## Extract the DMR in question from dmrcate output
-x <- new.dmrs[2]
+x <- new.dmrs[5]
 
 ## Extract the probes in this DMR
 probes <- subsetByOverlaps(myannotation.remap@ranges, x)
 
-betas <- beta_v2.clean2[rownames(beta_v2.clean2) %in% names(probes), ]
-betas <- betas[order(match(rownames(betas), names(probes))), ]
+betas <- getCollapsedBetas(myannotation.remap, x)
 melt <- melt(betas)
 
 ## Plot
@@ -498,7 +498,7 @@ p <- ggplot(melt, aes(
   ggtitle(
     paste(
       "Line Plot by Sample - New DMR - ",
-      x$overlapping.genes,
+      seqnames(x),
       " (",
       start(x),
       " - ",
@@ -538,7 +538,7 @@ p2 <- ggplot(melt2, aes(
   ggtitle(
     paste(
       "Line Plot by Cell Line - New DMR - ",
-      x$overlapping.genes,
+      seqnames(x),
       " (",
       start(x),
       " - ",
@@ -561,7 +561,7 @@ p2 <- ggplot(melt2, aes(
 p + p2
 ```
 
-Finally, let's have a look at this probe using the Gviz package, to show where it lies in a genomic context and compared to other probes surrounding it.
+Finally, let's have a look at this probe using the Gviz package, to show where it lies in a genomic context:
 
 ```{r, fig.height=8, fig.width=8, warning=F, message=FALSE}
 ## Create gviz tracks for chromosome on top and bar for length of area
@@ -591,7 +591,7 @@ refGenes <- UcscTrack(
 
 ## Create granges object that extracts positional information of each CpG and beta values from samples
 granges <- GRanges(
-  seqnames = probes@seqnames,
+  seqnames = gsub(":.*", "", rownames(betas)),
   ranges = probes@ranges,
   data = round(betas * 100, 3)
 )
@@ -659,113 +659,6 @@ plotTracks(
 )
 ```
 
-```{r, fig.height=8, fig.width=8, warning=F, message=FALSE}
-## Extract the DMR in question from dmrcate output with a wider window (+- 5000bp)
-x2 <- x
-start(x2) <- start(x2) - 5000
-end(x2) <- end(x2) + 5000
-
-probes <- subsetByOverlaps(myannotation.remap@ranges, x2)
-
-betas <- beta_v2.clean2[rownames(beta_v2.clean2) %in% names(probes), ]
-betas <- betas[order(match(rownames(betas), names(probes))), ]
-
-## Create gviz tracks for chromosome on top and bar for length of area
-gtrack <- Gviz::GenomeAxisTrack()
-ideoTrack <- IdeogramTrack(genome = "hg38", chromosome = seqnames(x2))
-
-## Create track to extract genes from UCSC
-refGenes <- UcscTrack(
-  genome = "hg38",
-  chromosome = seqnames(x2),
-  track = "NCBI RefSeq",
-  start = start(x2),
-  end = end(x2),
-  trackType = "GeneRegionTrack",
-  rstarts = "exonStarts",
-  rends = "exonEnds",
-  gene = "name",
-  symbol = "name2",
-  transcript = "name",
-  strand = "strand",
-  fill = "#8282d2",
-  stacking = "squish",
-  name = "NCBI RefSeq",
-  showId = TRUE,
-  geneSymbol = TRUE
-)
-
-## Create granges object that extracts positional information of each CpG and beta values from samples
-granges <- GRanges(
-  seqnames = probes@seqnames,
-  ranges = probes@ranges,
-  data = round(betas * 100, 3)
-)
-
-## Create track for data visualisation
-dTrack <- DataTrack(
-  granges,
-  name = "Beta",
-  ylim = c(0, 100),
-  groups = variable.of.choice,
-  col = myColors,
-  type = c("a", "confint"),
-  aggregation = "mean",
-  legend = TRUE,
-  na.rm = T
-)
-
-## Create a heatmap for each DMR
-dTrack.heatmap <- DataTrack(
-  granges,
-  name = "Beta",
-  ylim = c(0, 100),
-  gradient = brewer.pal(5, "Reds"),
-  showSampleNames = TRUE,
-  cex.sampleNames = 0.4,
-  type = c("heatmap"),
-  na.rm = T
-)
-
-## Add a bar to distinguish where the DMR is
-DMRbar <- AnnotationTrack(
-  start = start(x),
-  end = end(x),
-  chromosome = seqnames(x),
-  genome = "hg38",
-  col = "forestgreen",
-  fill = "forestgreen",
-  name = "DMR"
-)
-
-## Add lines to distinguish where CpGs are
-CpGbar <- AnnotationTrack(
-  start = start(probes),
-  end = end(probes),
-  chromosome = seqnames(probes),
-  genome = "hg38",
-  col = "forestgreen",
-  fill = "forestgreen",
-  name = "CpGs"
-)
-
-## Plot everything
-plotTracks(
-  c(
-    ideoTrack,
-    gtrack,
-    CpGbar,
-    DMRbar,
-    refGenes,
-    dTrack.heatmap,
-    dTrack
-  ),
-  from = start(x2) - 200,
-  to = end(x2) + 200
-)
-```
-
-We can see how this new DMR looks, and that it is right in the promoter region of the *LINC01666.*
 
 We hope you have found this tutorial helpful. If you have any questions on how to analyse EPICv2 data, or its compatibility with the new manifest and DMRcate package update, then do not hesitate to send us an email.
 
